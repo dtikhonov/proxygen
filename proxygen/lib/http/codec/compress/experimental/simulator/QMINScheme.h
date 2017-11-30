@@ -16,6 +16,7 @@ class QMINScheme : public CompressionScheme {
       : CompressionScheme(sim)
   {
     qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, NULL);
+    qms_next_stream_id_to_encode = 1;
   }
 
   ~QMINScheme()
@@ -36,7 +37,34 @@ class QMINScheme : public CompressionScheme {
   std::pair<bool, std::unique_ptr<folly::IOBuf>> encode(
     std::vector<compress::Header> allHeaders, SimStats& stats) override
   {
-    return {false, nullptr};
+    unsigned char outbuf[0x1000];
+    size_t nw, off;
+    enum qmin_encode_status qes;
+
+    off = 0;
+
+    for (const auto header : allHeaders) {
+      std::string name{header.name->c_str()};
+      std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+      qes = qmin_enc_encode(qms_enc, qms_next_stream_id_to_encode, name.c_str(),
+        name.length(), header.value->c_str(), header.value->length(), QIT_YES,
+        outbuf + off, sizeof(outbuf) - off, &nw);
+      switch (qes)
+      {
+      case QES_OK:
+        off += nw;
+        break;
+      case QES_NOBUFS:
+        VLOG(1) << "compressed header does not fit into temporary output buffer";
+        return {false, nullptr};
+      case QES_ERR:
+        VLOG(1) << "error: " << strerror(errno);
+        return {false, nullptr};
+      }
+    }
+
+    qms_next_stream_id_to_encode += 2;
+    return {false, folly::IOBuf::copyBuffer(outbuf, off)};
   }
 
   void decode(bool allowOOO, std::unique_ptr<folly::IOBuf> encodedReq,
@@ -56,5 +84,10 @@ class QMINScheme : public CompressionScheme {
   }
 
   struct qmin_enc *qms_enc;
+
+  /* Each call to `encode' is interpreted as a header block for a new
+   * stream.
+   */
+  unsigned         qms_next_stream_id_to_encode;
 };
 }}
