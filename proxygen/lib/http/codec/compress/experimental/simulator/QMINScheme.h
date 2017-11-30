@@ -88,7 +88,7 @@ class QMINScheme : public CompressionScheme {
 
   void runLoopCallback() noexcept override
   {
-    return;
+    CompressionScheme::runLoopCallback();
   }
 
   static void write_enc2dec (void *qco_ctx, const void *buf, size_t sz)
