@@ -17,9 +17,7 @@ class QMINScheme : public CompressionScheme {
       : CompressionScheme(sim)
   {
     qms_ctl[0].qco_write = write_enc2dec;
-    qms_ctl[0].qco_ctx = this;
     qms_ctl[1].qco_write = write_dec2enc;
-    qms_ctl[0].qco_ctx = this;
 
     qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, &qms_ctl[0]);
     qms_dec = qmin_dec_new(QSIDE_SERVER, 64 * 1024, &qms_ctl[1]);
@@ -54,6 +52,7 @@ class QMINScheme : public CompressionScheme {
     enum qmin_encode_status qes;
 
     qms_ctl_off = 0;
+    qms_ctl[0].qco_ctx = this;
     comp_sz = 0;
 
     for (const auto header : allHeaders) {
@@ -78,11 +77,15 @@ class QMINScheme : public CompressionScheme {
       }
     }
 
+    if (0 != qmin_enc_end_stream_headers(qms_enc))
+      VLOG(1) << "error: qmin_enc_end_stream_headers failed";
+
     /* Prepend control message and its size: */
     if (qms_ctl_off)
       memcpy(outbuf + max_ctl - qms_ctl_off, qms_ctl_buf, qms_ctl_off);
     memcpy(outbuf + max_ctl - qms_ctl_off - sizeof(qms_ctl_off), &qms_ctl_off,
            sizeof(qms_ctl_off));
+    stats.compressed += sizeof(qms_ctl_off) + qms_ctl_off;
 
     /* Prepend Stream ID: */
     memcpy(outbuf + max_ctl - qms_ctl_off - sizeof(qms_ctl_off) - sizeof(uint32_t),
@@ -107,6 +110,7 @@ class QMINScheme : public CompressionScheme {
     uint32_t stream_id;
 
     qms_ctl_off = 0;
+    qms_ctl[1].qco_ctx = this;
 
     /* Read Stream ID: */
     buf = cursor.data();
