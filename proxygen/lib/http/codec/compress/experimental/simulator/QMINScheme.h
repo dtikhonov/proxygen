@@ -5,16 +5,22 @@
 #include <proxygen/lib/http/codec/compress/HPACKQueue.h>
 #include <proxygen/lib/http/codec/compress/NoPathIndexingStrategy.h>
 
+#include "qmin_common.h"
+#include "qmin_dec.h"
+#include "qmin_enc.h"
+
 namespace proxygen {  namespace compress {
 class QMINScheme : public CompressionScheme {
  public:
   explicit QMINScheme(CompressionSimulator* sim)
       : CompressionScheme(sim)
   {
+    qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, NULL);
   }
 
   ~QMINScheme()
   {
+    qmin_enc_destroy(qms_enc);
   }
 
   std::unique_ptr<CompressionScheme::Ack> getAck(uint16_t seqn) override
@@ -48,5 +54,7 @@ class QMINScheme : public CompressionScheme {
   {
     return;
   }
+
+  struct qmin_enc *qms_enc;
 };
 }}
