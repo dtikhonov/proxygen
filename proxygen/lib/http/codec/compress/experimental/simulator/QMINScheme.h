@@ -30,7 +30,7 @@ class QMINScheme : public CompressionScheme {
 
   void recvAck(std::unique_ptr<CompressionScheme::Ack> ack) override
   {
-    return nullptr;
+    return;
   }
 
   std::pair<bool, std::unique_ptr<folly::IOBuf>> encode(

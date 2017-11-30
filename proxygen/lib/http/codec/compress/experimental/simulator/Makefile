@@ -11,4 +11,5 @@ HEADERS=CompressionScheme.h CompressionSimulator.h HPACKScheme.h \
 	../../test/HTTPArchive.h qmin/qmin_enc.h
 
 simulator: ${SOURCES} ${HEADERS}
-	g++ -std=gnu++14 -o $@ -I ../../../../../../.. -I ../qpack ${SOURCES} -L qmin -lqmin -lfolly -lfollylogging -lfollyinit -lglog -lgflags -lproxygenlib -lpthread -ldouble-conversion
+	g++ -std=gnu++14 -o $@ -I ../../../../../../.. -I ../qpack -I qmin \
+		${SOURCES} -L qmin -lqmin -lfolly -lfollylogging -lfollyinit -lglog -lgflags -lproxygenlib -lpthread -ldouble-conversion
