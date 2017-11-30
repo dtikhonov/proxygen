@@ -1,5 +1,6 @@
 #pragma once
 
+#include <assert.h>
 #include <proxygen/lib/http/codec/compress/experimental/simulator/CompressionScheme.h>
 #include <proxygen/lib/http/codec/compress/HPACKCodec.h>
 #include <proxygen/lib/http/codec/compress/HPACKQueue.h>
@@ -72,13 +73,38 @@ class QMINScheme : public CompressionScheme {
     }
 
     qms_next_stream_id_to_encode += 2;
-    return {false, folly::IOBuf::copyBuffer(outbuf, off)};
+    return {true, folly::IOBuf::copyBuffer(outbuf, off)};
   }
 
-  void decode(bool allowOOO, std::unique_ptr<folly::IOBuf> encodedReq,
-              SimStats& stats, SimStreamingCallback& callback) override
+  void decode(bool, std::unique_ptr<folly::IOBuf> encodedReq,
+              SimStats&, SimStreamingCallback& callback) override
   {
-    return;
+    folly::io::Cursor cursor(encodedReq.get());
+    const unsigned char *buf = cursor.data();
+    const unsigned char *const end = buf + cursor.length();
+    ssize_t nread;
+    char outbuf[0x1000];
+    unsigned name_len, val_len;
+    unsigned decoded_size = 0;
+
+    while (buf < end)
+    {
+      nread = qmin_dec_decode(qms_dec, buf, end - buf, outbuf, sizeof(outbuf),
+                              &name_len, &val_len);
+      if (nread < 0)
+      {
+        VLOG(1) << "ERROR: decoder failed!";
+        return;
+      }
+      assert(nread);
+      buf += nread;
+      decoded_size += name_len + val_len;
+      std::string name{outbuf, name_len};
+      std::string value{outbuf + name_len, val_len};
+      callback.onHeader(name, value);
+    }
+
+    callback.onHeadersComplete(proxygen::HTTPHeaderSize{decoded_size});
   }
 
   uint32_t getHolBlockCount() const override
