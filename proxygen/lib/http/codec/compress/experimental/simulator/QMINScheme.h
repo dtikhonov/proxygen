@@ -61,6 +61,8 @@ class QMINScheme : public CompressionScheme {
       switch (qes)
       {
       case QES_OK:
+        stats.uncompressed += name.length() + header.value->length();
+        stats.compressed += nw;
         off += nw;
         break;
       case QES_NOBUFS:
