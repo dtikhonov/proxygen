@@ -1,3 +1,5 @@
+CFLAGS=-Wall -g3 -O0
+
 SOURCES=CompressionSimulator.cpp Main.cpp ../qpack/QPACKCodec.cpp \
 	../qpack/QPACKContext.cpp ../qpack/QPACKDecoder.cpp \
 	../qpack/QPACKEncoder.cpp ../qpack/QPACKHeaderTable.cpp \
@@ -11,5 +13,8 @@ HEADERS=CompressionScheme.h CompressionSimulator.h HPACKScheme.h \
 	../../test/HTTPArchive.h qmin/qmin_enc.h
 
 simulator: ${SOURCES} ${HEADERS}
-	g++ -std=gnu++14 -o $@ -I ../../../../../../.. -I ../qpack -I qmin \
+	g++ -std=gnu++14 $(CFLAGS) -o $@ -I ../../../../../../.. -I ../qpack -I qmin \
 		${SOURCES} -L qmin -lqmin -lfolly -lfollylogging -lfollyinit -lglog -lgflags -lproxygenlib -lpthread -ldouble-conversion
+
+clean:
+	rm -v simulator
