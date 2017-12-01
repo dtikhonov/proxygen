@@ -1,6 +1,7 @@
 #pragma once
 
 #include <assert.h>
+#include <sys/queue.h>
 #include <proxygen/lib/http/codec/compress/experimental/simulator/CompressionScheme.h>
 #include <proxygen/lib/http/codec/compress/HPACKCodec.h>
 #include <proxygen/lib/http/codec/compress/HPACKQueue.h>
@@ -10,25 +11,87 @@
 #include "qmin_dec.h"
 #include "qmin_enc.h"
 
+TAILQ_HEAD(stream_chunks_head, stream_chunk);
+
+struct stream_chunk
+{
+  TAILQ_ENTRY(stream_chunk) sc_next;
+  size_t                    sc_off;
+  size_t                    sc_sz;
+  unsigned char             sc_buf[0];
+};
+
+struct stream
+{
+  struct stream_chunks_head   sm_chunks;
+  size_t                      sm_read_off;
+};
+
 namespace proxygen {  namespace compress {
 class QMINScheme : public CompressionScheme {
  public:
+
+  static struct stream_chunk *
+  stream_chunk_new (size_t off, const void *buf, size_t bufsz)
+  {
+    struct stream_chunk *chunk = (struct stream_chunk *) malloc(sizeof(*chunk) + bufsz);
+    assert(chunk);
+    chunk->sc_off = off;
+    chunk->sc_sz = bufsz;
+    memcpy(chunk->sc_buf, buf, bufsz);
+    return chunk;
+  }
+
+  static void
+  insert_chunk (struct stream *stream, struct stream_chunk *new_chunk)
+  {
+    struct stream_chunk *chunk;
+    TAILQ_FOREACH(chunk, &stream->sm_chunks, sc_next)
+      if (chunk->sc_off < new_chunk->sc_off)
+      {
+        TAILQ_INSERT_BEFORE(chunk, new_chunk, sc_next);
+        return;
+      }
+    TAILQ_INSERT_TAIL(&stream->sm_chunks, new_chunk, sc_next);
+  }
+
+  static struct stream_chunk *
+  maybe_pop_chunk (struct stream *stream)
+  {
+    struct stream_chunk *chunk = TAILQ_FIRST(&stream->sm_chunks);
+    if (chunk && chunk->sc_off == stream->sm_read_off)
+    {
+      TAILQ_REMOVE(&stream->sm_chunks, chunk, sc_next);
+      stream->sm_read_off += chunk->sc_sz;
+      return chunk;
+    }
+    else
+      return NULL;
+  }
+
   explicit QMINScheme(CompressionSimulator* sim)
       : CompressionScheme(sim)
   {
     qms_ctl[0].out.qco_write = write_enc2dec;
-    qms_ctl[0].off = 0;
+    qms_ctl[0].write_off = 0;
+    qms_ctl[0].sz = 0;
     qms_ctl[1].out.qco_write = write_dec2enc;
-    qms_ctl[1].off = 0;
+    qms_ctl[1].write_off = 0;
+    qms_ctl[1].sz = 0;
 
     qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, &qms_ctl[0].out);
     qms_dec = qmin_dec_new(QSIDE_SERVER, 64 * 1024, &qms_ctl[1].out);
+
+    qms_streams = (struct stream *) calloc(2, sizeof(qms_streams[0]));
+    TAILQ_INIT(&qms_streams[0].sm_chunks);
+    TAILQ_INIT(&qms_streams[1].sm_chunks);
 
     qms_next_stream_id_to_encode = 1;
   }
 
   ~QMINScheme()
   {
+    free(qms_streams);
     qmin_enc_destroy(qms_enc);
     qmin_dec_destroy(qms_dec);
   }
@@ -37,22 +100,26 @@ class QMINScheme : public CompressionScheme {
    * to the encoder.
    */
   struct QMINAck : public CompressionScheme::Ack {
-    explicit QMINAck (const void *buf, size_t bufsz)
+    explicit QMINAck (size_t off, const void *buf, size_t bufsz)
     {
+      qma_off = off;
       qma_sz = bufsz;
       memcpy(qma_buf, buf, bufsz);
     }
 
+    size_t        qma_off;
     size_t        qma_sz;
     unsigned char qma_buf[0x1000];
   };
 
   std::unique_ptr<Ack> getAck(uint16_t seqn) override
   {
-    if (qms_ctl[1].off)
+    if (qms_ctl[1].sz)
     {
-      auto ack = std::make_unique<QMINAck>(qms_ctl[1].buf, qms_ctl[1].off);
-      qms_ctl[1].off = 0;
+      auto ack = std::make_unique<QMINAck>(qms_ctl[1].write_off, qms_ctl[1].buf,
+                                           qms_ctl[1].sz);
+      qms_ctl[1].write_off += qms_ctl[1].sz;
+      qms_ctl[1].sz = 0;
       return ack;
     }
     else
@@ -64,16 +131,25 @@ class QMINScheme : public CompressionScheme {
 
   void recvAck(std::unique_ptr<Ack> generic_ack) override
   {
+    struct stream_chunk *chunk;
+
     CHECK(generic_ack);
     auto ack = dynamic_cast<QMINAck*>(generic_ack.get());
     CHECK_NOTNULL(ack);
 
-    ssize_t nread;
-    nread = qmin_enc_cmds_in(qms_enc, ack->qma_buf, ack->qma_sz);
-    if (nread < 0 || (size_t) nread != ack->qma_sz)
+    chunk = stream_chunk_new(ack->qma_off, ack->qma_buf, ack->qma_sz);
+    insert_chunk(&qms_streams[0], chunk);
+
+    while ((chunk = maybe_pop_chunk(&qms_streams[0])))
     {
-      VLOG(1) << "error: qmin_enc_cmds_in failed";
-      assert(0);
+      ssize_t nread;
+      nread = qmin_enc_cmds_in(qms_enc, chunk->sc_buf, chunk->sc_sz);
+      if (nread < 0 || (size_t) nread != chunk->sc_sz)
+      {
+        VLOG(1) << "error: qmin_enc_cmds_in failed";
+        assert(0);
+      }
+      free(chunk);
     }
   }
 
@@ -120,22 +196,32 @@ class QMINScheme : public CompressionScheme {
     }
 
     /* Prepend control message and its size: */
-    size_t ctl_msg_sz = qms_ctl[0].off;
-    qms_ctl[0].off = 0;
+    size_t ctl_msg_sz = qms_ctl[0].sz;
+    qms_ctl[0].sz = 0;
+    size_t ctl_msg_sz_with_off;
     if (ctl_msg_sz)
+    {
       memcpy(outbuf + max_ctl - ctl_msg_sz, qms_ctl[0].buf, ctl_msg_sz);
-    memcpy(outbuf + max_ctl - ctl_msg_sz - sizeof(ctl_msg_sz), &ctl_msg_sz,
-           sizeof(ctl_msg_sz));
-    stats.compressed += sizeof(ctl_msg_sz) + ctl_msg_sz;
+      memcpy(outbuf + max_ctl - ctl_msg_sz - sizeof(qms_ctl[0].write_off),
+        &qms_ctl[0].write_off, sizeof(qms_ctl[0].write_off));
+      qms_ctl[0].write_off += ctl_msg_sz;
+      ctl_msg_sz_with_off = ctl_msg_sz + sizeof(qms_ctl[0].write_off);
+    }
+    else
+      ctl_msg_sz_with_off = 0;
+    memcpy(outbuf + max_ctl - ctl_msg_sz_with_off - sizeof(ctl_msg_sz),
+      &ctl_msg_sz, sizeof(ctl_msg_sz));
+
+    stats.compressed += ctl_msg_sz;
 
     /* Prepend Stream ID: */
-    memcpy(outbuf + max_ctl - ctl_msg_sz - sizeof(ctl_msg_sz) - sizeof(uint32_t),
+    memcpy(outbuf + max_ctl - ctl_msg_sz_with_off - sizeof(ctl_msg_sz) - sizeof(uint32_t),
            &qms_next_stream_id_to_encode, sizeof(qms_next_stream_id_to_encode));
 
     qms_next_stream_id_to_encode += 2;
-    return {true, folly::IOBuf::copyBuffer(outbuf + max_ctl - ctl_msg_sz -
+    return {true, folly::IOBuf::copyBuffer(outbuf + max_ctl - ctl_msg_sz_with_off -
       sizeof(ctl_msg_sz) - sizeof(uint32_t),
-      comp_sz + ctl_msg_sz + sizeof(ctl_msg_sz) + sizeof(uint32_t))};
+      comp_sz + ctl_msg_sz_with_off + sizeof(ctl_msg_sz) + sizeof(uint32_t))};
   }
 
   void decode(bool, std::unique_ptr<folly::IOBuf> encodedReq,
@@ -144,13 +230,12 @@ class QMINScheme : public CompressionScheme {
     folly::io::Cursor cursor(encodedReq.get());
     const unsigned char *buf;
     ssize_t nread;
-    size_t ctl_sz;
+    size_t ctl_sz, stream_off;
     char outbuf[0x1000];
     unsigned name_len, val_len;
     unsigned decoded_size = 0;
     uint32_t stream_id;
 
-    qms_ctl[1].off = 0;
     qms_ctl[1].out.qco_ctx = this;
 
     /* Read Stream ID: */
@@ -166,15 +251,30 @@ class QMINScheme : public CompressionScheme {
     /* Feed control messages to the decoder: */
     if (ctl_sz)
     {
+      struct stream_chunk *chunk;
+
+      /* Read stream offset: */
       buf = cursor.data();
-      nread = qmin_dec_cmds_in(qms_dec, buf, ctl_sz);
-      if (nread < 0 || (size_t) nread != ctl_sz)
-      {
-        VLOG(1) << "oops: could not get all commands in";
-        assert(0);
-        return;
-      }
+      memcpy(&stream_off, buf, sizeof(stream_off));
+      encodedReq->trimStart(sizeof(stream_off));
+
+      buf = cursor.data();
+      chunk = stream_chunk_new(stream_off, buf, ctl_sz);
       encodedReq->trimStart(ctl_sz);
+
+      insert_chunk(&qms_streams[1], chunk);
+
+      while ((chunk = maybe_pop_chunk(&qms_streams[1])))
+      {
+        ssize_t nread;
+        nread = qmin_dec_cmds_in(qms_dec, chunk->sc_buf, chunk->sc_sz);
+        if (nread < 0 || (size_t) nread != chunk->sc_sz)
+        {
+          VLOG(1) << "error: qmin_dec_cmds_in failed";
+          assert(0);
+        }
+        free(chunk);
+      }
     }
 
     buf = cursor.data();
@@ -219,7 +319,7 @@ class QMINScheme : public CompressionScheme {
 
   void write_ctl_msg (const void *buf, size_t sz, unsigned idx)
   {
-    size_t avail = sizeof(qms_ctl[idx].buf) - qms_ctl[idx].off;
+    size_t avail = sizeof(qms_ctl[idx].buf) - qms_ctl[idx].sz;
     assert(avail >= sz);
     if (avail < sz)
     {
@@ -227,8 +327,8 @@ class QMINScheme : public CompressionScheme {
               << avail << "bytes";
       sz = avail;
     }
-    memcpy(qms_ctl[idx].buf + qms_ctl[idx].off, buf, sz);
-    qms_ctl[idx].off += sz;
+    memcpy(qms_ctl[idx].buf + qms_ctl[idx].sz, buf, sz);
+    qms_ctl[idx].sz += sz;
     VLOG(4) << "Wrote " << sz << " bytes to control channel";
   }
 
@@ -252,9 +352,13 @@ class QMINScheme : public CompressionScheme {
    */
   unsigned              qms_next_stream_id_to_encode;
 
+  /* 0: decoder-to-encoder; 1: encoder-to-decoder */
+  struct stream        *qms_streams;
+
   struct {
     struct qmin_ctl_out   out;
-    size_t                off;
+    size_t                write_off;
+    size_t                sz;
     unsigned char         buf[0x1000];
   }                     qms_ctl[2]; /* 0: enc-to-dec; 1: dec-to-enc */
 };
