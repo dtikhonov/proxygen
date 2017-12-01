@@ -187,7 +187,10 @@ class QMINScheme : public CompressionScheme {
       switch (qes)
       {
       case QES_OK:
-        stats.uncompressed += name.length() + header.value->length();
+        /* 2 is a magic number added to the uncompressed size by the other
+         * encoder.  We follow suit to make the numbers match.
+         */
+        stats.uncompressed += name.length() + header.value->length() + 2;
         stats.compressed += nw;
         comp_sz += nw;
         break;
