@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <sys/queue.h>
+#include <folly/String.h>
 #include <proxygen/lib/http/codec/compress/experimental/simulator/CompressionScheme.h>
 #include <proxygen/lib/http/codec/compress/HPACKCodec.h>
 #include <proxygen/lib/http/codec/compress/HPACKQueue.h>
@@ -10,6 +11,8 @@
 #include "qmin_common.h"
 #include "qmin_dec.h"
 #include "qmin_enc.h"
+
+static unsigned s_seq;
 
 TAILQ_HEAD(stream_chunks_head, stream_chunk);
 
@@ -79,8 +82,11 @@ class QMINScheme : public CompressionScheme {
     qms_ctl[1].write_off = 0;
     qms_ctl[1].sz = 0;
 
-    qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, &qms_ctl[0].out);
-    qms_dec = qmin_dec_new(QSIDE_SERVER, 64 * 1024, &qms_ctl[1].out);
+    qms_idstr = (char *) malloc(8);
+    sprintf(qms_idstr, "%u", s_seq++);
+
+    qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, &qms_ctl[0].out, qms_idstr);
+    qms_dec = qmin_dec_new(QSIDE_SERVER, 64 * 1024, &qms_ctl[1].out, qms_idstr);
 
     qms_streams = (struct stream *) calloc(2, sizeof(qms_streams[0]));
     TAILQ_INIT(&qms_streams[0].sm_chunks);
@@ -94,6 +100,7 @@ class QMINScheme : public CompressionScheme {
     free(qms_streams);
     qmin_enc_destroy(qms_enc);
     qmin_dec_destroy(qms_dec);
+    free(qms_idstr);
   }
 
   /* QMIN Ack carries QMM_STREAM_DONE and QMM_ACK_FLUSH messages from decoder
@@ -118,9 +125,11 @@ class QMINScheme : public CompressionScheme {
     {
       auto ack = std::make_unique<QMINAck>(qms_ctl[1].write_off, qms_ctl[1].buf,
                                            qms_ctl[1].sz);
+      VLOG(4) << "sent ACK for instance " << qms_idstr << " off: "
+        << qms_ctl[1].write_off << "; sz: " << qms_ctl[1].sz;
       qms_ctl[1].write_off += qms_ctl[1].sz;
       qms_ctl[1].sz = 0;
-      return ack;
+      return std::move(ack);
     }
     else
     {
@@ -136,6 +145,9 @@ class QMINScheme : public CompressionScheme {
     CHECK(generic_ack);
     auto ack = dynamic_cast<QMINAck*>(generic_ack.get());
     CHECK_NOTNULL(ack);
+
+    VLOG(4) << "received ACK for instance " << qms_idstr << " off: "
+      << ack->qma_off << "; sz: " << ack->qma_sz;
 
     chunk = stream_chunk_new(ack->qma_off, ack->qma_buf, ack->qma_sz);
     insert_chunk(&qms_streams[0], chunk);
@@ -187,6 +199,13 @@ class QMINScheme : public CompressionScheme {
         assert(0);
         return {false, nullptr};
       }
+    }
+
+    {
+      size_t sz;
+      char *state = qmin_enc_to_str(qms_enc, &sz);
+      VLOG(4) << "encoder state: " << state;
+      free(state);
     }
 
     if (0 != qmin_enc_end_stream_headers(qms_enc))
@@ -343,6 +362,8 @@ class QMINScheme : public CompressionScheme {
     QMINScheme *const qms = (QMINScheme *) ctx;
     qms->write_ctl_msg(buf, sz, 1);
   }
+
+  char                 *qms_idstr;
 
   struct qmin_enc      *qms_enc;
   struct qmin_dec      *qms_dec;
