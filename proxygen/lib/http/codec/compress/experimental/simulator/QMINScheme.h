@@ -186,13 +186,8 @@ class QMINScheme : public CompressionScheme {
       callback.onHeader(name, value);
     }
 
-    {
-      unsigned char *dst, *end;
-      dst = &qms_ctl[1].buf[ qms_ctl[1].off ];
-      *dst = QMM_STREAM_DONE;
-      end = qmin_enc_int(dst, qms_ctl[1].buf + sizeof(qms_ctl[1].buf), stream_id, 4);
-      qms_ctl[1].off += end - dst;
-    }
+    if (0 != qmin_dec_stream_done(qms_dec, stream_id))
+      VLOG(1) << "error: qmin_dec_stream_done failed";
 
     callback.onHeadersComplete(proxygen::HTTPHeaderSize{decoded_size});
   }
