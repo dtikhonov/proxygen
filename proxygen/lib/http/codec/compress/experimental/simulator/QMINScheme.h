@@ -47,7 +47,7 @@ class QMINScheme : public CompressionScheme {
   {
     struct stream_chunk *chunk;
     TAILQ_FOREACH(chunk, &stream->sm_chunks, sc_next)
-      if (chunk->sc_off < new_chunk->sc_off)
+      if (chunk->sc_off > new_chunk->sc_off)
       {
         TAILQ_INSERT_BEFORE(chunk, new_chunk, sc_next);
         return;
