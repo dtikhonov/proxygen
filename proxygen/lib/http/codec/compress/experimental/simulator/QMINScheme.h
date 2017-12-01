@@ -17,7 +17,9 @@ class QMINScheme : public CompressionScheme {
       : CompressionScheme(sim)
   {
     qms_ctl[0].out.qco_write = write_enc2dec;
+    qms_ctl[0].off = 0;
     qms_ctl[1].out.qco_write = write_dec2enc;
+    qms_ctl[1].off = 0;
 
     qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, &qms_ctl[0].out);
     qms_dec = qmin_dec_new(QSIDE_SERVER, 64 * 1024, &qms_ctl[1].out);
@@ -69,7 +71,10 @@ class QMINScheme : public CompressionScheme {
     ssize_t nread;
     nread = qmin_enc_cmds_in(qms_enc, ack->qma_buf, ack->qma_sz);
     if (nread < 0 || (size_t) nread != ack->qma_sz)
+    {
       VLOG(1) << "error: qmin_enc_cmds_in failed";
+      assert(0);
+    }
   }
 
   std::pair<bool, std::unique_ptr<folly::IOBuf>> encode(
@@ -82,7 +87,6 @@ class QMINScheme : public CompressionScheme {
     size_t nw, comp_sz;
     enum qmin_encode_status qes;
 
-    qms_ctl[0].off = 0;
     qms_ctl[0].out.qco_ctx = this;
     comp_sz = 0;
 
@@ -104,28 +108,34 @@ class QMINScheme : public CompressionScheme {
         return {false, nullptr};
       case QES_ERR:
         VLOG(1) << "error: " << strerror(errno);
+        assert(0);
         return {false, nullptr};
       }
     }
 
     if (0 != qmin_enc_end_stream_headers(qms_enc))
+    {
       VLOG(1) << "error: qmin_enc_end_stream_headers failed";
+      assert(0);
+    }
 
     /* Prepend control message and its size: */
-    if (qms_ctl[0].off)
-      memcpy(outbuf + max_ctl - qms_ctl[0].off, qms_ctl[0].buf, qms_ctl[0].off);
-    memcpy(outbuf + max_ctl - qms_ctl[0].off - sizeof(qms_ctl[0].off), &qms_ctl[0].off,
-           sizeof(qms_ctl[0].off));
-    stats.compressed += sizeof(qms_ctl[0].off) + qms_ctl[0].off;
+    size_t ctl_msg_sz = qms_ctl[0].off;
+    qms_ctl[0].off = 0;
+    if (ctl_msg_sz)
+      memcpy(outbuf + max_ctl - ctl_msg_sz, qms_ctl[0].buf, ctl_msg_sz);
+    memcpy(outbuf + max_ctl - ctl_msg_sz - sizeof(ctl_msg_sz), &ctl_msg_sz,
+           sizeof(ctl_msg_sz));
+    stats.compressed += sizeof(ctl_msg_sz) + ctl_msg_sz;
 
     /* Prepend Stream ID: */
-    memcpy(outbuf + max_ctl - qms_ctl[0].off - sizeof(qms_ctl[0].off) - sizeof(uint32_t),
+    memcpy(outbuf + max_ctl - ctl_msg_sz - sizeof(ctl_msg_sz) - sizeof(uint32_t),
            &qms_next_stream_id_to_encode, sizeof(qms_next_stream_id_to_encode));
 
     qms_next_stream_id_to_encode += 2;
-    return {true, folly::IOBuf::copyBuffer(outbuf + max_ctl - qms_ctl[0].off -
-      sizeof(qms_ctl[0].off) - sizeof(uint32_t),
-      comp_sz + qms_ctl[0].off + sizeof(qms_ctl[0].off) + sizeof(uint32_t))};
+    return {true, folly::IOBuf::copyBuffer(outbuf + max_ctl - ctl_msg_sz -
+      sizeof(ctl_msg_sz) - sizeof(uint32_t),
+      comp_sz + ctl_msg_sz + sizeof(ctl_msg_sz) + sizeof(uint32_t))};
   }
 
   void decode(bool, std::unique_ptr<folly::IOBuf> encodedReq,
@@ -161,6 +171,7 @@ class QMINScheme : public CompressionScheme {
       if (nread < 0 || (size_t) nread != ctl_sz)
       {
         VLOG(1) << "oops: could not get all commands in";
+        assert(0);
         return;
       }
       encodedReq->trimStart(ctl_sz);
@@ -175,7 +186,8 @@ class QMINScheme : public CompressionScheme {
                               &name_len, &val_len);
       if (nread < 0)
       {
-        VLOG(1) << "ERROR: decoder failed!";
+        VLOG(1) << "error: decoder failed!";
+        assert(0);
         return;
       }
       assert(nread);
@@ -187,7 +199,10 @@ class QMINScheme : public CompressionScheme {
     }
 
     if (0 != qmin_dec_stream_done(qms_dec, stream_id))
+    {
+      assert(0);
       VLOG(1) << "error: qmin_dec_stream_done failed";
+    }
 
     callback.onHeadersComplete(proxygen::HTTPHeaderSize{decoded_size});
   }
@@ -205,6 +220,7 @@ class QMINScheme : public CompressionScheme {
   void write_ctl_msg (const void *buf, size_t sz, unsigned idx)
   {
     size_t avail = sizeof(qms_ctl[idx].buf) - qms_ctl[idx].off;
+    assert(avail >= sz);
     if (avail < sz)
     {
       VLOG(1) << "Truncating control message from " << sz << " to "
