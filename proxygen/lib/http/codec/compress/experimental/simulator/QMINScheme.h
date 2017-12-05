@@ -85,8 +85,8 @@ class QMINScheme : public CompressionScheme {
     qms_idstr = (char *) malloc(8);
     sprintf(qms_idstr, "%u", s_seq++);
 
-    qms_enc = qmin_enc_new(QSIDE_CLIENT, 64 * 1024, &qms_ctl[0].out, qms_idstr);
-    qms_dec = qmin_dec_new(QSIDE_SERVER, 64 * 1024, &qms_ctl[1].out, qms_idstr);
+    qms_enc = qmin_enc_new(QSIDE_CLIENT, 4 * 1024, &qms_ctl[0].out, qms_idstr);
+    qms_dec = qmin_dec_new(QSIDE_SERVER, 4 * 1024, &qms_ctl[1].out, qms_idstr);
 
     qms_streams = (struct stream *) calloc(2, sizeof(qms_streams[0]));
     TAILQ_INIT(&qms_streams[0].sm_chunks);
